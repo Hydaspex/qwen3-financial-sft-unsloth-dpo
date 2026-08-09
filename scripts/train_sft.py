@@ -19,6 +19,15 @@ def precision_flags() -> tuple[bool, bool]:
     return bf16, fp16
 
 
+def format_messages(example: dict, tokenizer) -> str:
+    """Render a messages record using the model's chat template."""
+    return tokenizer.apply_chat_template(
+        example["messages"],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -44,6 +53,7 @@ def main() -> None:
         processing_class=tokenizer,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
+        formatting_func=lambda example: format_messages(example, tokenizer),
         args=SFTConfig(
             output_dir=str(config.sft.output_dir),
             num_train_epochs=config.sft.epochs,

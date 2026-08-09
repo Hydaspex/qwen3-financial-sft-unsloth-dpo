@@ -1,11 +1,12 @@
 """DPO preference optimisation entry point."""
 
 import argparse
+import json
 
 import mlflow
 import torch
 import unsloth  # noqa: F401
-from datasets import load_dataset
+from datasets import Dataset
 from trl import DPOConfig, DPOTrainer
 from unsloth import FastLanguageModel
 
@@ -19,6 +20,36 @@ def precision_flags() -> tuple[bool, bool]:
     return bf16, fp16
 
 
+def jsonl_records(path: str) -> list[dict]:
+    """Read newline-delimited JSON records."""
+    with open(path, encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream if line.strip()]
+
+
+def render_preference_pairs(records: list[dict], tokenizer) -> list[dict]:
+    """Render preference records into plain prompt/chosen/rejected strings.
+
+    The prompt uses the model's chat template with a generation prompt so the
+    completions are scored as continuations. Rendering before trainer
+    construction avoids heterogeneous schemas between map shards.
+    """
+    rendered = []
+    for record in records:
+        prompt = record["prompt"]
+        if isinstance(prompt, list):
+            prompt = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        rendered.append({
+            "prompt": prompt,
+            "chosen": str(record["chosen"]),
+            "rejected": str(record["rejected"]),
+        })
+    return rendered
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -30,7 +61,8 @@ def main() -> None:
         max_seq_length=config.model.max_seq_length,
         load_in_4bit=config.model.load_in_4bit,
     )
-    dataset = load_dataset("json", data_files=str(config.data.preference_path), split="train")
+    pairs = render_preference_pairs(jsonl_records(str(config.data.preference_path)), tokenizer)
+    dataset = Dataset.from_list(pairs)
     use_bf16, use_fp16 = precision_flags()
     print(f"Training precision: bf16={use_bf16}, fp16={use_fp16}")
     trainer = DPOTrainer(

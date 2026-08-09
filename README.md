@@ -23,7 +23,7 @@ SFT teaches grounded financial answer formatting. DPO then prefers concise, cont
 ```text
 configs/post_training.yaml       # model, LoRA, SFT, DPO and evaluation settings
 src/finpost/                     # validated configuration, data and metrics
-scripts/                         # preparation, SFT, DPO and evaluation entry points
+scripts/                         # preparation, SFT, DPO, comparison and evaluation
 notebooks/colab_pipeline.ipynb   # one-click Colab GPU workflow
 tests/                           # CPU-only unit tests
 .github/workflows/ci.yml         # Ruff and pytest
@@ -46,6 +46,26 @@ python scripts/train_dpo.py --config configs/post_training.yaml \
 ```
 
 For a Colab run, select a GPU runtime, clone the repo, run `pip install -q -e ".[dev]"` from the repo root, and execute the same stages. The training scripts include a `sys.path` fallback so `finpost` imports even if the editable install is stale.
+
+## Comparing base, SFT and DPO
+
+After training both adapters, generate and score predictions from all three models on the same held-out validation prompts:
+
+```bash
+python scripts/compare_models.py \
+  --config configs/post_training.yaml \
+  --sft-adapter outputs/qwen3-financial-sft \
+  --dpo-adapter outputs/qwen3-financial-dpo \
+  --limit 50
+```
+
+This prints a table of `numeric_em`, `span_match` and `combined` per stage, logs each stage as a nested MLflow run under `{experiment_name}-comparison`, and writes predictions to `outputs/predictions_{stage}.jsonl`. Iterate over combined scores across experiments with:
+
+```python
+import mlflow
+runs = mlflow.search_runs(experiment_names=["/Shared/qwen3-financial-sft-unsloth-dpo"])
+print(runs[["run_name", "metrics.combined"]].dropna())
+```
 
 ## MLflow and evaluation
 

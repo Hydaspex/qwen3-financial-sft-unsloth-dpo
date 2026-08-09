@@ -3,11 +3,20 @@
 import argparse
 
 import mlflow
+import torch
+import unsloth  # noqa: F401
 from datasets import load_dataset
 from trl import DPOConfig, DPOTrainer
 from unsloth import FastLanguageModel
 
 from finpost.config import load_config
+
+
+def precision_flags() -> tuple[bool, bool]:
+    """Return bf16 and fp16 flags appropriate for the active GPU."""
+    bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    fp16 = torch.cuda.is_available() and not bf16
+    return bf16, fp16
 
 
 def main() -> None:
@@ -22,6 +31,8 @@ def main() -> None:
         load_in_4bit=config.model.load_in_4bit,
     )
     dataset = load_dataset("json", data_files=str(config.data.preference_path), split="train")
+    use_bf16, use_fp16 = precision_flags()
+    print(f"Training precision: bf16={use_bf16}, fp16={use_fp16}")
     trainer = DPOTrainer(
         model=model,
         processing_class=tokenizer,
@@ -35,6 +46,8 @@ def main() -> None:
             beta=config.dpo.beta,
             max_length=config.dpo.max_length,
             max_prompt_length=config.dpo.max_prompt_length,
+            bf16=use_bf16,
+            fp16=use_fp16,
             report_to=[],
         ),
     )

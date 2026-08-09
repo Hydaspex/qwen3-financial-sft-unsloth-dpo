@@ -3,11 +3,20 @@
 import argparse
 
 import mlflow
+import torch
+import unsloth  # noqa: F401
 from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
 
 from finpost.config import load_config
+
+
+def precision_flags() -> tuple[bool, bool]:
+    """Return bf16 and fp16 flags appropriate for the active GPU."""
+    bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    fp16 = torch.cuda.is_available() and not bf16
+    return bf16, fp16
 
 
 def main() -> None:
@@ -28,6 +37,8 @@ def main() -> None:
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     dataset = load_dataset("json", data_files={"train": str(config.data.train_path), "validation": str(config.data.validation_path)})
+    use_bf16, use_fp16 = precision_flags()
+    print(f"Training precision: bf16={use_bf16}, fp16={use_fp16}")
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
@@ -41,6 +52,8 @@ def main() -> None:
             learning_rate=config.sft.learning_rate,
             warmup_ratio=config.sft.warmup_ratio,
             max_length=config.model.max_seq_length,
+            bf16=use_bf16,
+            fp16=use_fp16,
             report_to=[],
         ),
     )

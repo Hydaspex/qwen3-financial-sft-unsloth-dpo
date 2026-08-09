@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
 import mlflow
 import torch
@@ -9,6 +11,8 @@ import unsloth  # noqa: F401
 from datasets import Dataset
 from trl import DPOConfig, DPOTrainer
 from unsloth import FastLanguageModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
 

@@ -2,20 +2,19 @@
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
 from huggingface_hub import hf_hub_download
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
 from finpost.data import preference_record, sft_record, split_records, write_jsonl
 
 
 def load_tatqa_json(dataset_name: str, split: str) -> list[dict]:
-    """Download and parse TAT-QA without Arrow schema inference.
-
-    TAT-QA contains heterogeneous nested JSON in ``questions``. Loading it
-    through the generic JSON dataset builder can make Pandas/PyArrow infer a
-    mixed list/non-list column and fail before records are available.
-    """
+    """Download and parse TAT-QA without Arrow schema inference."""
     filename = f"tatqa_dataset_{split}.json"
     local_path = hf_hub_download(repo_id=dataset_name, filename=filename, repo_type="dataset")
     with open(local_path, encoding="utf-8") as stream:

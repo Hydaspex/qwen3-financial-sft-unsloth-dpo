@@ -19,13 +19,14 @@ def precision_flags() -> tuple[bool, bool]:
     return bf16, fp16
 
 
-def format_messages(example: dict, tokenizer) -> str:
-    """Render a messages record using the model's chat template."""
-    return tokenizer.apply_chat_template(
+def format_messages(example: dict, tokenizer) -> list[str]:
+    """Render a messages record as the list expected by Unsloth."""
+    rendered = tokenizer.apply_chat_template(
         example["messages"],
         tokenize=False,
         add_generation_prompt=False,
     )
+    return [rendered]
 
 
 def main() -> None:

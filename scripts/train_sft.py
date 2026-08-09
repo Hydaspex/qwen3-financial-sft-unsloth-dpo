@@ -1,11 +1,12 @@
 """Unsloth QLoRA SFT entry point."""
 
 import argparse
+import json
 
 import mlflow
 import torch
 import unsloth  # noqa: F401
-from datasets import load_dataset
+from datasets import Dataset
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
 
@@ -19,14 +20,26 @@ def precision_flags() -> tuple[bool, bool]:
     return bf16, fp16
 
 
-def format_messages(example: dict, tokenizer) -> list[str]:
-    """Render a messages record as the list expected by Unsloth."""
-    rendered = tokenizer.apply_chat_template(
-        example["messages"],
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    return [rendered]
+def jsonl_records(path: str) -> list[dict]:
+    """Read newline-delimited JSON records."""
+    with open(path, encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream if line.strip()]
+
+
+def render_texts(records: list[dict], tokenizer) -> list[dict]:
+    """Render chat records into a plain text field before batching."""
+    rendered = []
+    for record in records:
+        if "text" in record:
+            text = record["text"]
+        else:
+            text = tokenizer.apply_chat_template(
+                record["messages"],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        rendered.append({"text": text})
+    return rendered
 
 
 def main() -> None:
@@ -46,15 +59,15 @@ def main() -> None:
         lora_dropout=config.model.lora_dropout,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
-    dataset = load_dataset("json", data_files={"train": str(config.data.train_path), "validation": str(config.data.validation_path)})
+    train = Dataset.from_list(render_texts(jsonl_records(str(config.data.train_path)), tokenizer))
+    validation = Dataset.from_list(render_texts(jsonl_records(str(config.data.validation_path)), tokenizer))
     use_bf16, use_fp16 = precision_flags()
     print(f"Training precision: bf16={use_bf16}, fp16={use_fp16}")
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
-        train_dataset=dataset["train"],
-        eval_dataset=dataset["validation"],
-        formatting_func=lambda example: format_messages(example, tokenizer),
+        train_dataset=train,
+        eval_dataset=validation,
         args=SFTConfig(
             output_dir=str(config.sft.output_dir),
             num_train_epochs=config.sft.epochs,
@@ -63,6 +76,7 @@ def main() -> None:
             learning_rate=config.sft.learning_rate,
             warmup_ratio=config.sft.warmup_ratio,
             max_length=config.model.max_seq_length,
+            dataset_text_field="text",
             bf16=use_bf16,
             fp16=use_fp16,
             report_to=[],

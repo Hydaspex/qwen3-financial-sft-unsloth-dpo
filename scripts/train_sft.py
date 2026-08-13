@@ -9,12 +9,12 @@ import mlflow
 import torch
 import unsloth  # noqa: F401
 from datasets import Dataset
-from transformers.trainer_utils import get_last_checkpoint
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from finpost.checkpoints import find_resumable_checkpoint
 from finpost.config import load_config
 
 
@@ -95,11 +95,8 @@ def main() -> None:
     )
     # Auto-resume: if output_dir already has a checkpoint (e.g. this script
     # was killed mid-run by a runtime disconnect), pick up from it instead of
-    # silently restarting at step 0. get_last_checkpoint requires the folder
-    # to already exist, which it won't on a fresh run.
-    last_checkpoint = None
-    if Path(config.sft.output_dir).exists():
-        last_checkpoint = get_last_checkpoint(str(config.sft.output_dir))
+    # silently restarting at step 0.
+    last_checkpoint = find_resumable_checkpoint(config.sft.output_dir)
     if last_checkpoint:
         print(f"Resuming from checkpoint: {last_checkpoint}")
 

@@ -9,6 +9,7 @@ import mlflow
 import torch
 import unsloth  # noqa: F401
 from datasets import Dataset
+from transformers.trainer_utils import get_last_checkpoint
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
 
@@ -84,13 +85,29 @@ def main() -> None:
             bf16=use_bf16,
             fp16=use_fp16,
             report_to=[],
+            # A flaky free-tier Colab runtime can disconnect at any point in a
+            # multi-hour run, so checkpoint often enough that a disconnect
+            # costs minutes, not hours. save_total_limit keeps disk bounded.
+            save_strategy="steps",
+            save_steps=100,
+            save_total_limit=3,
         ),
     )
+    # Auto-resume: if output_dir already has a checkpoint (e.g. this script
+    # was killed mid-run by a runtime disconnect), pick up from it instead of
+    # silently restarting at step 0. get_last_checkpoint requires the folder
+    # to already exist, which it won't on a fresh run.
+    last_checkpoint = None
+    if Path(config.sft.output_dir).exists():
+        last_checkpoint = get_last_checkpoint(str(config.sft.output_dir))
+    if last_checkpoint:
+        print(f"Resuming from checkpoint: {last_checkpoint}")
+
     if config.mlflow.tracking_uri:
         mlflow.set_tracking_uri(config.mlflow.tracking_uri)
     mlflow.set_experiment(config.mlflow.experiment)
     with mlflow.start_run(run_name=f"{config.experiment_name}-sft"):
-        trainer.train()
+        trainer.train(resume_from_checkpoint=last_checkpoint)
         trainer.save_model(str(config.sft.output_dir))
         mlflow.log_param("stage", "sft")
         mlflow.log_artifacts(str(config.sft.output_dir), artifact_path="sft_adapter")

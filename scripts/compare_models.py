@@ -1,15 +1,27 @@
 """Compare base, SFT and DPO models on the held-out validation set.
 
 Generates predictions from each model on identical prompts, scores them with
-the offline harness, logs metrics to MLflow as nested runs, and prints a
-comparison table. Models are loaded sequentially to fit limited VRAM.
+the offline harness, logs metrics (with bootstrap CIs) to MLflow as nested
+runs, and prints a comparison table. Models are loaded sequentially to fit
+limited VRAM; within each model, prompts are generated in batches.
+
+By default this evaluates the full validation split (--limit 0). Pass a
+positive --limit to cap it, e.g. for a quick smoke run.
 
 Usage:
     python scripts/compare_models.py \
         --config configs/post_training.yaml \
         --sft-adapter outputs/qwen3-financial-sft \
         --dpo-adapter outputs/qwen3-financial-dpo \
-        --limit 50
+        --batch-size 8
+
+Note on batched generation: left-padding plus an explicit pad_token_id keeps
+batched decoding numerically equivalent to single-example decoding for real
+(non-pad) tokens in exact arithmetic, but different CUDA/attention kernel
+paths for different batch sizes can still introduce tiny floating-point
+differences in practice. Before trusting a full-split run, spot-check this
+once by generating the same ~15 examples with --batch-size 1 and your
+intended batch size and diffing predictions/scores.
 """
 
 import argparse
@@ -26,7 +38,7 @@ from unsloth import FastLanguageModel
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
-from finpost.evaluate import score
+from finpost.evaluate import bootstrap_ci, per_example_results, score
 
 
 def jsonl_records(path: str) -> list[dict]:
@@ -41,33 +53,54 @@ def generate_predictions(
     records: list[dict],
     max_seq_length: int,
     max_new_tokens: int = 64,
+    batch_size: int = 8,
 ) -> list[str]:
-    """Load a model, generate answers for each validation prompt, then release VRAM."""
+    """Load a model, batch-generate answers for validation prompts, then release VRAM."""
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_path,
         max_seq_length=max_seq_length,
         load_in_4bit=True,
     )
     FastLanguageModel.for_inference(model)
-    predictions = []
-    for record in records:
-        messages = record["messages"][:-1]
-        prompt = tokenizer.apply_chat_template(
-            messages,
+
+    # Left padding is required for batched causal-LM generation: with every
+    # row's real tokens right-aligned, generate() appends new tokens after
+    # the same index (the padded prompt length) for every row, so a single
+    # prompt_len slice below is correct for the whole batch.
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    prompts = [
+        tokenizer.apply_chat_template(
+            record["messages"][:-1],
             tokenize=False,
             add_generation_prompt=True,
         )
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        output = model.generate(
+        for record in records
+    ]
+
+    predictions: list[str] = []
+    for start in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[start : start + batch_size]
+        inputs = tokenizer(
+            batch_prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_seq_length,
+        ).to(model.device)
+        outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
         )
-        prediction = tokenizer.decode(
-            output[0][inputs["input_ids"].shape[1]:],
-            skip_special_tokens=True,
-        )
-        predictions.append(prediction.strip())
+        prompt_len = inputs["input_ids"].shape[1]
+        for row in outputs:
+            prediction = tokenizer.decode(row[prompt_len:], skip_special_tokens=True)
+            predictions.append(prediction.strip())
+
     del model
     gc.collect()
     torch.cuda.empty_cache()
@@ -79,12 +112,20 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--sft-adapter", required=True)
     parser.add_argument("--dpo-adapter", required=True)
-    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Cap the number of validation examples (0 = use the full split).",
+    )
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--output", default="outputs/comparison_results.json")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    records = jsonl_records(str(config.data.validation_path))[: args.limit]
+    records = jsonl_records(str(config.data.validation_path))
+    if args.limit > 0:
+        records = records[: args.limit]
     golds = [record["messages"][-1]["content"] for record in records]
 
     stages = {
@@ -111,17 +152,30 @@ def main() -> None:
                 model_path,
                 records,
                 config.model.max_seq_length,
+                batch_size=args.batch_size,
             )
             metrics = score(predictions, golds)
-            results[stage] = {"predictions": predictions, "metrics": metrics}
+            example_results = per_example_results(predictions, golds)
+            _, numeric_lo, numeric_hi = bootstrap_ci([r["numeric_em"] for r in example_results])
+            _, span_lo, span_hi = bootstrap_ci([r["span_match"] for r in example_results])
+            ci = {
+                "numeric_em_ci_low": numeric_lo,
+                "numeric_em_ci_high": numeric_hi,
+                "span_match_ci_low": span_lo,
+                "span_match_ci_high": span_hi,
+            }
+            results[stage] = {"predictions": predictions, "metrics": metrics, "ci": ci}
             with mlflow.start_run(run_name=stage, nested=True):
                 mlflow.log_param("model_path", model_path)
                 mlflow.log_param("n_eval", len(records))
                 mlflow.log_metrics(metrics)
+                mlflow.log_metrics(ci)
                 pred_path = Path(f"outputs/predictions_{stage}.jsonl")
                 pred_path.parent.mkdir(parents=True, exist_ok=True)
                 pred_path.write_text(
-                    "\n".join(json.dumps(p) for p in predictions),
+                    "\n".join(
+                        json.dumps({"index": i, **r}) for i, r in enumerate(example_results)
+                    ),
                     encoding="utf-8",
                 )
                 mlflow.log_artifact(str(pred_path), artifact_path="predictions")

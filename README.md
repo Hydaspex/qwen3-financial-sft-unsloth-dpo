@@ -22,13 +22,16 @@ SFT teaches grounded financial answer formatting. DPO then prefers concise, cont
 ## Repository layout
 
 ```text
-configs/post_training.yaml       # model, LoRA, SFT, DPO and evaluation settings
-src/finpost/                     # validated configuration, data and metrics
-scripts/                         # preparation, SFT, DPO, comparison and evaluation
-notebooks/colab_pipeline.ipynb   # one-click Colab GPU workflow
-tests/                           # CPU-only unit tests
-.github/workflows/ci.yml         # Ruff and pytest
+configs/post_training.yaml         # model, LoRA, SFT, DPO and evaluation settings
+src/finpost/                       # validated configuration, data, metrics and generation
+scripts/                           # preparation, SFT, DPO, comparison and evaluation
+notebooks/colab_pipeline.ipynb     # one-click Colab smoke run (small config)
+notebooks/kaggle_full_run.ipynb    # full pipeline as an unattended Kaggle commit
+tests/                             # CPU-only unit tests
+.github/workflows/ci.yml           # Ruff and pytest
 ```
+
+The Colab notebook runs a reduced smoke configuration interactively — fast, but not the numbers below. The Kaggle notebook runs the full config as a background `Save & Run All` commit (12h session cap, ~30 free GPU-hours/week), independent of keeping a browser tab open, and is what actually produced the results reported here.
 
 ## Quick start
 

@@ -17,11 +17,13 @@ Usage:
 
 Note on batched generation: left-padding plus an explicit pad_token_id keeps
 batched decoding numerically equivalent to single-example decoding for real
-(non-pad) tokens in exact arithmetic, but different CUDA/attention kernel
-paths for different batch sizes can still introduce tiny floating-point
-differences in practice. Before trusting a full-split run, spot-check this
-once by generating the same ~15 examples with --batch-size 1 and your
-intended batch size and diffing predictions/scores.
+(non-pad) tokens in exact arithmetic. The padding/slicing logic itself
+(batch_generate) is unit tested on CPU with a tiny HF model in
+tests/test_pipeline.py, so that correctness question doesn't require a GPU to
+verify. What CPU testing can't rule out is CUDA/attention kernel selection
+varying with batch size on real GPU hardware; if you want to double-check
+that too, generate the same ~15 examples with --batch-size 1 and your
+intended batch size on Unsloth/CUDA and diff predictions/scores.
 """
 
 import argparse
@@ -39,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
 from finpost.evaluate import bootstrap_ci, per_example_results, score
+from finpost.generate import batch_generate
 
 
 def jsonl_records(path: str) -> list[dict]:
@@ -47,7 +50,22 @@ def jsonl_records(path: str) -> list[dict]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-@torch.inference_mode()
+def load_model_for_inference(model_path: str, max_seq_length: int):
+    """Load a model via Unsloth and set it up for inference.
+
+    Thin and Unsloth-specific by design, so it stays GPU-only without pulling
+    the testable batching logic in finpost.generate.batch_generate along with
+    it — see that function's docstring for why the split matters.
+    """
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_path,
+        max_seq_length=max_seq_length,
+        load_in_4bit=True,
+    )
+    FastLanguageModel.for_inference(model)
+    return model, tokenizer
+
+
 def generate_predictions(
     model_path: str,
     records: list[dict],
@@ -56,20 +74,7 @@ def generate_predictions(
     batch_size: int = 8,
 ) -> list[str]:
     """Load a model, batch-generate answers for validation prompts, then release VRAM."""
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_path,
-        max_seq_length=max_seq_length,
-        load_in_4bit=True,
-    )
-    FastLanguageModel.for_inference(model)
-
-    # Left padding is required for batched causal-LM generation: with every
-    # row's real tokens right-aligned, generate() appends new tokens after
-    # the same index (the padded prompt length) for every row, so a single
-    # prompt_len slice below is correct for the whole batch.
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    model, tokenizer = load_model_for_inference(model_path, max_seq_length)
 
     prompts = [
         tokenizer.apply_chat_template(
@@ -80,26 +85,9 @@ def generate_predictions(
         for record in records
     ]
 
-    predictions: list[str] = []
-    for start in range(0, len(prompts), batch_size):
-        batch_prompts = prompts[start : start + batch_size]
-        inputs = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_seq_length,
-        ).to(model.device)
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-        prompt_len = inputs["input_ids"].shape[1]
-        for row in outputs:
-            prediction = tokenizer.decode(row[prompt_len:], skip_special_tokens=True)
-            predictions.append(prediction.strip())
+    predictions = batch_generate(
+        model, tokenizer, prompts, max_seq_length, max_new_tokens, batch_size
+    )
 
     del model
     gc.collect()

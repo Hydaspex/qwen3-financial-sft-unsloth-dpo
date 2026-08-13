@@ -8,6 +8,7 @@ from finpost.evaluate import (
     per_example_results,
     score,
 )
+from finpost.generate import batch_generate
 
 
 def test_preference_record_shape():
@@ -91,3 +92,46 @@ def test_mcnemar_no_discordant_pairs_returns_p_one():
 def test_mcnemar_rejects_length_mismatch():
     with pytest.raises(ValueError):
         mcnemar_one_sided([True], [True, False])
+
+
+def _tiny_causal_lm():
+    """A ~few-hundred-KB public test model, standard practice for testing
+    generation code without needing a real model (the same models
+    transformers' own test suite uses for this purpose)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    name = "hf-internal-testing/tiny-random-gpt2"
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    model = AutoModelForCausalLM.from_pretrained(name)
+    model.eval()
+    return model, tokenizer
+
+
+def test_batch_generate_matches_single_example_generation():
+    """Greedy decoding must give identical output whether a prompt is
+    generated alone or padded into a batch with others — this is exactly the
+    left-padding/slicing correctness compare_models.py's docstring flags as a
+    risk, verified here on CPU instead of only by hand on a GPU."""
+    model, tokenizer = _tiny_causal_lm()
+    prompts = ["Hello there", "A much longer prompt to force real padding", "Hi"]
+
+    solo = [
+        batch_generate(model, tokenizer, [p], max_seq_length=32, max_new_tokens=5, batch_size=1)[0]
+        for p in prompts
+    ]
+    batched = batch_generate(
+        model, tokenizer, prompts, max_seq_length=32, max_new_tokens=5, batch_size=len(prompts)
+    )
+
+    assert batched == solo
+
+
+def test_batch_generate_handles_batch_size_smaller_than_input():
+    model, tokenizer = _tiny_causal_lm()
+    prompts = ["one", "two", "three", "four", "five"]
+
+    predictions = batch_generate(
+        model, tokenizer, prompts, max_seq_length=32, max_new_tokens=3, batch_size=2
+    )
+
+    assert len(predictions) == len(prompts)

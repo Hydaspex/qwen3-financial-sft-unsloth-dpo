@@ -2,7 +2,6 @@
 
 Portfolio-grade financial LLM post-training pipeline: **Unsloth QLoRA supervised fine-tuning (SFT)** followed by **direct preference optimisation (DPO)** on Qwen3-4B, with MLflow tracking, an evaluation harness, and Colab-ready entry points.
 
-> British English is used throughout this repository: *optimisation*, *modelling*, *licence*, and *artefact*.
 
 ## Pipeline
 

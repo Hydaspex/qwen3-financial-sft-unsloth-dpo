@@ -1,5 +1,7 @@
 # qwen3-financial-sft-unsloth-dpo
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Hydaspex/qwen3-financial-sft-unsloth-dpo/blob/main/notebooks/colab_pipeline.ipynb)
+
 Portfolio-grade financial LLM post-training pipeline: **Unsloth QLoRA supervised fine-tuning (SFT)** followed by **direct preference optimisation (DPO)** on Qwen3-4B, with MLflow tracking, an evaluation harness, and Colab-ready entry points.
 
 

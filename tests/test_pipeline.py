@@ -1,5 +1,6 @@
 import pytest
 
+from finpost.checkpoints import find_resumable_checkpoint
 from finpost.data import preference_record, split_records
 from finpost.evaluate import (
     bootstrap_ci,
@@ -135,3 +136,31 @@ def test_batch_generate_handles_batch_size_smaller_than_input():
     )
 
     assert len(predictions) == len(prompts)
+
+
+def test_find_resumable_checkpoint_missing_dir_returns_none(tmp_path):
+    assert find_resumable_checkpoint(tmp_path / "does-not-exist") is None
+
+
+def test_find_resumable_checkpoint_empty_dir_returns_none(tmp_path):
+    assert find_resumable_checkpoint(tmp_path) is None
+
+
+def test_find_resumable_checkpoint_returns_highest_step(tmp_path):
+    (tmp_path / "checkpoint-50").mkdir()
+    (tmp_path / "checkpoint-200").mkdir()
+    (tmp_path / "checkpoint-100").mkdir()
+
+    result = find_resumable_checkpoint(tmp_path)
+
+    assert result == str(tmp_path / "checkpoint-200")
+
+
+def test_find_resumable_checkpoint_ignores_non_checkpoint_dirs(tmp_path):
+    (tmp_path / "checkpoint-10").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "some_file.txt").write_text("not a checkpoint")
+
+    result = find_resumable_checkpoint(tmp_path)
+
+    assert result == str(tmp_path / "checkpoint-10")

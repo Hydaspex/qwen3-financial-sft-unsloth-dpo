@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +33,31 @@ def sft_record(example: dict[str, Any], question: dict[str, Any], max_chars: int
     context = context_text(example, max_chars)
     if not context or question.get("answer") in (None, ""):
         return None
-    return {"messages": [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{context}\n\nQuestion: {question['question']}"},
-        {"role": "assistant", "content": answer_text(question["answer"])},
-    ]}
+    return {
+        # Carried through so evaluation can score each answer with the metric
+        # its type calls for -- TAT-QA mixes numeric and textual answers, and
+        # scoring both with both metrics penalises every example on the one
+        # that cannot apply.
+        "answer_type": question.get("answer_type", ""),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{context}\n\nQuestion: {question['question']}"},
+            {"role": "assistant", "content": answer_text(question["answer"])},
+        ],
+    }
+
+
+def prompt_completion_record(sft: dict) -> dict:
+    """Split a chat record into TRL's conversational prompt-completion format.
+
+    TRL decides whether to mask the prompt by inspecting the dataset columns:
+    it enables completion-only loss only when both "prompt" and "completion"
+    are present, and otherwise treats the row as plain language modelling and
+    trains on every token. Handing it a single pre-rendered text field
+    therefore silently trains the model to reproduce the report context --
+    which here is ~99% of the tokens -- instead of to answer the question.
+    """
+    return {"prompt": sft["messages"][:-1], "completion": sft["messages"][-1:]}
 
 
 def preference_record(sft: dict, rejected: str) -> dict:
@@ -46,6 +67,42 @@ def preference_record(sft: dict, rejected: str) -> dict:
         "chosen": sft["messages"][-1]["content"],
         "rejected": rejected,
     }
+
+
+def _looks_numeric(text: str) -> bool:
+    """True if the answer is a bare figure rather than prose."""
+    return bool(re.fullmatch(r"[-+$(]?\s*[\d,]+\.?\d*\s*[)%]?", text.strip()))
+
+
+def preference_records(records: list[dict], seed: int) -> list[dict]:
+    """Pair each record with a wrong answer of the same shape.
+
+    A single constant rejection ("I cannot determine...") only teaches the
+    model not to emit that one phrase, which is why DPO barely moved the
+    metrics. Drawing the rejection from another question's gold answer --
+    and matching figure against figure, prose against prose -- makes the
+    pair turn on whether the answer is *right*, not on which one looks like
+    an answer at all.
+    """
+    golds = [record["messages"][-1]["content"] for record in records]
+    numeric = [g for g in golds if _looks_numeric(g)]
+    prose = [g for g in golds if not _looks_numeric(g)]
+    rng = random.Random(seed)
+
+    preferences = []
+    for record, gold in zip(records, golds):
+        pool = numeric if _looks_numeric(gold) else prose
+        # Fall back to the other pool if this one is too small to differ.
+        candidates = pool if len(pool) > 1 else golds
+        rejected = gold
+        for _ in range(10):
+            rejected = rng.choice(candidates)
+            if rejected.strip().casefold() != gold.strip().casefold():
+                break
+        else:
+            continue  # no distinct distractor found; drop rather than emit a degenerate pair
+        preferences.append(preference_record(record, rejected))
+    return preferences
 
 
 def split_records(records: list[dict], fraction: float, seed: int) -> tuple[list[dict], list[dict]]:

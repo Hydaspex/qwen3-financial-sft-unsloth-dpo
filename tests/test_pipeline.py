@@ -1,13 +1,20 @@
 import pytest
 
 from finpost.checkpoints import find_resumable_checkpoint
-from finpost.data import preference_record, split_records
+from finpost.data import (
+    preference_record,
+    preference_records,
+    prompt_completion_record,
+    split_records,
+)
 from finpost.evaluate import (
     bootstrap_ci,
+    match_by_type,
     mcnemar_one_sided,
     numeric_match,
     per_example_results,
     score,
+    score_by_type,
 )
 from finpost.generate import batch_generate
 
@@ -18,6 +25,59 @@ def test_preference_record_shape():
     assert record["chosen"] == "42"
     assert record["rejected"] == "I do not know"
     assert record["prompt"][0]["role"] == "user"
+
+
+def test_prompt_completion_record_separates_prompt_from_answer():
+    """TRL enables completion-only loss only when it sees separate "prompt"
+    and "completion" columns; a single pre-rendered text field makes it train
+    on every token, so the report context (~99% of them) dominates the
+    gradient instead of the answer."""
+    sft = {"messages": [
+        {"role": "system", "content": "You are a financial analyst."},
+        {"role": "user", "content": "Table...\n\nQuestion: What is revenue?"},
+        {"role": "assistant", "content": "435"},
+    ]}
+
+    record = prompt_completion_record(sft)
+
+    assert set(record) == {"prompt", "completion"}
+    assert record["completion"] == [{"role": "assistant", "content": "435"}]
+    assert [m["role"] for m in record["prompt"]] == ["system", "user"]
+
+
+def _chat(answer: str) -> dict:
+    return {"messages": [
+        {"role": "user", "content": "Question?"},
+        {"role": "assistant", "content": answer},
+    ]}
+
+
+def test_preference_records_reject_a_different_answer():
+    """A constant rejection only teaches the model to avoid one phrase; the
+    rejected answer has to be a real alternative for the pair to carry signal."""
+    records = [_chat("435"), _chat("1.8"), _chat("30,927"), _chat("2018")]
+
+    preferences = preference_records(records, seed=42)
+
+    assert len(preferences) == len(records)
+    for pref in preferences:
+        assert pref["rejected"] != pref["chosen"]
+
+
+def test_preference_records_match_answer_shape():
+    """Figures are rejected with figures and prose with prose, so the pair
+    turns on correctness rather than on which one looks like an answer."""
+    records = [_chat("435"), _chat("1.8"), _chat("restricted cash"), _chat("goodwill impairment")]
+
+    preferences = preference_records(records, seed=0)
+
+    numeric_rejections = [p["rejected"] for p in preferences if p["chosen"] in {"435", "1.8"}]
+    assert all(r in {"435", "1.8"} for r in numeric_rejections)
+
+
+def test_preference_records_are_deterministic():
+    records = [_chat("435"), _chat("1.8"), _chat("30,927")]
+    assert preference_records(records, seed=7) == preference_records(records, seed=7)
 
 
 def test_split_is_deterministic():
@@ -41,10 +101,37 @@ def test_empty_score_rejected():
 
 def test_per_example_results_shape():
     results = per_example_results(["1000", "cloud services"], ["1000", "Cloud Services"])
-    assert results == [
-        {"prediction": "1000", "gold": "1000", "numeric_em": True, "span_match": True},
-        {"prediction": "cloud services", "gold": "Cloud Services", "numeric_em": False, "span_match": True},
-    ]
+    assert [r["numeric_em"] for r in results] == [True, False]
+    assert [r["span_match"] for r in results] == [True, True]
+    assert [r["prediction"] for r in results] == ["1000", "cloud services"]
+
+
+def test_match_by_type_routes_to_the_right_metric():
+    """The same prediction is right or wrong depending on the question type,
+    which is exactly what scoring every example with both metrics destroys."""
+    # An arithmetic answer is judged numerically, so prose around it is fine.
+    assert match_by_type("The total is 1,000", "1000", "arithmetic")
+    # A span answer is judged textually, so a number alone cannot satisfy it.
+    assert not match_by_type("1000", "cloud services", "span")
+    assert match_by_type("we sell cloud services", "Cloud Services", "span")
+
+
+def test_match_by_type_multi_span_requires_every_span():
+    assert match_by_type("2019 and 2018", "2019, 2018", "multi-span")
+    assert not match_by_type("only 2019 here", "2019, 2018", "multi-span")
+
+
+def test_score_by_type_breaks_down_by_answer_type():
+    predictions = ["1000", "cloud services", "50", "goodwill"]
+    golds = ["1000", "Cloud Services", "999", "goodwill"]
+    types = ["arithmetic", "span", "arithmetic", "span"]
+
+    metrics = score_by_type(predictions, golds, types)
+
+    assert metrics["accuracy"] == 0.75
+    assert metrics["accuracy_arithmetic"] == 0.5
+    assert metrics["accuracy_span"] == 1.0
+    assert metrics["n_arithmetic"] == 2.0
 
 
 def test_per_example_results_rejects_length_mismatch():

@@ -39,6 +39,19 @@ def sft_record(example: dict[str, Any], question: dict[str, Any], max_chars: int
     ]}
 
 
+def prompt_completion_record(sft: dict) -> dict:
+    """Split a chat record into TRL's conversational prompt-completion format.
+
+    TRL decides whether to mask the prompt by inspecting the dataset columns:
+    it enables completion-only loss only when both "prompt" and "completion"
+    are present, and otherwise treats the row as plain language modelling and
+    trains on every token. Handing it a single pre-rendered text field
+    therefore silently trains the model to reproduce the report context --
+    which here is ~99% of the tokens -- instead of to answer the question.
+    """
+    return {"prompt": sft["messages"][:-1], "completion": sft["messages"][-1:]}
+
+
 def preference_record(sft: dict, rejected: str) -> dict:
     """Convert an SFT record into TRL preference format."""
     return {

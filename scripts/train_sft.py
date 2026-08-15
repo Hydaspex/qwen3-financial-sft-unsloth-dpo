@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.checkpoints import find_resumable_checkpoint
 from finpost.config import load_config
+from finpost.data import prompt_completion_record
 
 
 def precision_flags() -> tuple[bool, bool]:
@@ -31,20 +32,14 @@ def jsonl_records(path: str) -> list[dict]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def render_texts(records: list[dict], tokenizer) -> list[dict]:
-    """Render chat records into a plain text field before batching."""
-    rendered = []
-    for record in records:
-        if "text" in record:
-            text = record["text"]
-        else:
-            text = tokenizer.apply_chat_template(
-                record["messages"],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        rendered.append({"text": text})
-    return rendered
+def prompt_completion_dataset(records: list[dict]) -> list[dict]:
+    """Convert chat records into TRL's prompt-completion format.
+
+    Deliberately does not pre-render the chat template: TRL applies it
+    itself, and only masks the prompt when it can see separate "prompt" and
+    "completion" columns -- see finpost.data.prompt_completion_record.
+    """
+    return [prompt_completion_record(record) for record in records]
 
 
 def main() -> None:
@@ -64,8 +59,10 @@ def main() -> None:
         lora_dropout=config.model.lora_dropout,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
-    train = Dataset.from_list(render_texts(jsonl_records(str(config.data.train_path)), tokenizer))
-    validation = Dataset.from_list(render_texts(jsonl_records(str(config.data.validation_path)), tokenizer))
+    train = Dataset.from_list(prompt_completion_dataset(jsonl_records(str(config.data.train_path))))
+    validation = Dataset.from_list(
+        prompt_completion_dataset(jsonl_records(str(config.data.validation_path)))
+    )
     use_bf16, use_fp16 = precision_flags()
     print(f"Training precision: bf16={use_bf16}, fp16={use_fp16}")
     trainer = SFTTrainer(
@@ -81,7 +78,10 @@ def main() -> None:
             learning_rate=config.sft.learning_rate,
             warmup_ratio=config.sft.warmup_ratio,
             max_length=config.model.max_seq_length,
-            dataset_text_field="text",
+            # Explicit rather than relying on TRL's column sniffing: the whole
+            # point of the prompt-completion format above is that the report
+            # context is masked out of the loss.
+            completion_only_loss=True,
             bf16=use_bf16,
             fp16=use_fp16,
             report_to=[],

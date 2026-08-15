@@ -1,7 +1,7 @@
 import pytest
 
 from finpost.checkpoints import find_resumable_checkpoint
-from finpost.data import preference_record, split_records
+from finpost.data import preference_record, prompt_completion_record, split_records
 from finpost.evaluate import (
     bootstrap_ci,
     mcnemar_one_sided,
@@ -18,6 +18,24 @@ def test_preference_record_shape():
     assert record["chosen"] == "42"
     assert record["rejected"] == "I do not know"
     assert record["prompt"][0]["role"] == "user"
+
+
+def test_prompt_completion_record_separates_prompt_from_answer():
+    """TRL enables completion-only loss only when it sees separate "prompt"
+    and "completion" columns; a single pre-rendered text field makes it train
+    on every token, so the report context (~99% of them) dominates the
+    gradient instead of the answer."""
+    sft = {"messages": [
+        {"role": "system", "content": "You are a financial analyst."},
+        {"role": "user", "content": "Table...\n\nQuestion: What is revenue?"},
+        {"role": "assistant", "content": "435"},
+    ]}
+
+    record = prompt_completion_record(sft)
+
+    assert set(record) == {"prompt", "completion"}
+    assert record["completion"] == [{"role": "assistant", "content": "435"}]
+    assert [m["role"] for m in record["prompt"]] == ["system", "user"]
 
 
 def test_split_is_deterministic():

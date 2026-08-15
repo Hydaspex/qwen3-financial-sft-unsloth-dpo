@@ -33,11 +33,18 @@ def sft_record(example: dict[str, Any], question: dict[str, Any], max_chars: int
     context = context_text(example, max_chars)
     if not context or question.get("answer") in (None, ""):
         return None
-    return {"messages": [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{context}\n\nQuestion: {question['question']}"},
-        {"role": "assistant", "content": answer_text(question["answer"])},
-    ]}
+    return {
+        # Carried through so evaluation can score each answer with the metric
+        # its type calls for -- TAT-QA mixes numeric and textual answers, and
+        # scoring both with both metrics penalises every example on the one
+        # that cannot apply.
+        "answer_type": question.get("answer_type", ""),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{context}\n\nQuestion: {question['question']}"},
+            {"role": "assistant", "content": answer_text(question["answer"])},
+        ],
+    }
 
 
 def prompt_completion_record(sft: dict) -> dict:

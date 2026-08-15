@@ -40,7 +40,7 @@ from unsloth import FastLanguageModel
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
-from finpost.evaluate import bootstrap_ci, per_example_results, score
+from finpost.evaluate import bootstrap_ci, per_example_results, score_by_type
 from finpost.generate import batch_generate
 
 
@@ -115,6 +115,7 @@ def main() -> None:
     if args.limit > 0:
         records = records[: args.limit]
     golds = [record["messages"][-1]["content"] for record in records]
+    answer_types = [record.get("answer_type", "") for record in records]
 
     stages = {
         "base": config.model.name_or_path,
@@ -142,16 +143,10 @@ def main() -> None:
                 config.model.max_seq_length,
                 batch_size=args.batch_size,
             )
-            metrics = score(predictions, golds)
-            example_results = per_example_results(predictions, golds)
-            _, numeric_lo, numeric_hi = bootstrap_ci([r["numeric_em"] for r in example_results])
-            _, span_lo, span_hi = bootstrap_ci([r["span_match"] for r in example_results])
-            ci = {
-                "numeric_em_ci_low": numeric_lo,
-                "numeric_em_ci_high": numeric_hi,
-                "span_match_ci_low": span_lo,
-                "span_match_ci_high": span_hi,
-            }
+            metrics = score_by_type(predictions, golds, answer_types)
+            example_results = per_example_results(predictions, golds, answer_types)
+            _, accuracy_lo, accuracy_hi = bootstrap_ci([r["correct"] for r in example_results])
+            ci = {"accuracy_ci_low": accuracy_lo, "accuracy_ci_high": accuracy_hi}
             results[stage] = {"predictions": predictions, "metrics": metrics, "ci": ci}
             with mlflow.start_run(run_name=stage, nested=True):
                 mlflow.log_param("model_path", model_path)
@@ -172,12 +167,20 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
+    breakdown = sorted(
+        {k for data in results.values() for k in data["metrics"] if k.startswith("accuracy_")}
+    )
+    header = f"{'Stage':<8} {'accuracy':>10} {'95% CI':>18}"
+    header += "".join(f"{k.removeprefix('accuracy_'):>14}" for k in breakdown)
     print("\n=== Comparison ===")
-    print(f"{'Stage':<8} {'numeric_em':>12} {'span_match':>12} {'combined':>10}")
-    print("-" * 46)
+    print(header)
+    print("-" * len(header))
     for stage, data in results.items():
-        m = data["metrics"]
-        print(f"{stage:<8} {m['numeric_em']:>12.4f} {m['span_match']:>12.4f} {m['combined']:>10.4f}")
+        m, ci = data["metrics"], data["ci"]
+        row = f"{stage:<8} {m['accuracy']:>10.4f} "
+        row += f"[{ci['accuracy_ci_low']:.3f}, {ci['accuracy_ci_high']:.3f}]".rjust(18)
+        row += "".join(f"{m.get(k, float('nan')):>14.4f}" for k in breakdown)
+        print(row)
     print(f"\nResults written to {output_path}")
 
 

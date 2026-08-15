@@ -9,10 +9,12 @@ from finpost.data import (
 )
 from finpost.evaluate import (
     bootstrap_ci,
+    match_by_type,
     mcnemar_one_sided,
     numeric_match,
     per_example_results,
     score,
+    score_by_type,
 )
 from finpost.generate import batch_generate
 
@@ -99,10 +101,37 @@ def test_empty_score_rejected():
 
 def test_per_example_results_shape():
     results = per_example_results(["1000", "cloud services"], ["1000", "Cloud Services"])
-    assert results == [
-        {"prediction": "1000", "gold": "1000", "numeric_em": True, "span_match": True},
-        {"prediction": "cloud services", "gold": "Cloud Services", "numeric_em": False, "span_match": True},
-    ]
+    assert [r["numeric_em"] for r in results] == [True, False]
+    assert [r["span_match"] for r in results] == [True, True]
+    assert [r["prediction"] for r in results] == ["1000", "cloud services"]
+
+
+def test_match_by_type_routes_to_the_right_metric():
+    """The same prediction is right or wrong depending on the question type,
+    which is exactly what scoring every example with both metrics destroys."""
+    # An arithmetic answer is judged numerically, so prose around it is fine.
+    assert match_by_type("The total is 1,000", "1000", "arithmetic")
+    # A span answer is judged textually, so a number alone cannot satisfy it.
+    assert not match_by_type("1000", "cloud services", "span")
+    assert match_by_type("we sell cloud services", "Cloud Services", "span")
+
+
+def test_match_by_type_multi_span_requires_every_span():
+    assert match_by_type("2019 and 2018", "2019, 2018", "multi-span")
+    assert not match_by_type("only 2019 here", "2019, 2018", "multi-span")
+
+
+def test_score_by_type_breaks_down_by_answer_type():
+    predictions = ["1000", "cloud services", "50", "goodwill"]
+    golds = ["1000", "Cloud Services", "999", "goodwill"]
+    types = ["arithmetic", "span", "arithmetic", "span"]
+
+    metrics = score_by_type(predictions, golds, types)
+
+    assert metrics["accuracy"] == 0.75
+    assert metrics["accuracy_arithmetic"] == 0.5
+    assert metrics["accuracy_span"] == 1.0
+    assert metrics["n_arithmetic"] == 2.0
 
 
 def test_per_example_results_rejects_length_mismatch():

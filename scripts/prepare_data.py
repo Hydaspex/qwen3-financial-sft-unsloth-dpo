@@ -10,7 +10,7 @@ from huggingface_hub import hf_hub_download
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from finpost.config import load_config
-from finpost.data import preference_record, sft_record, split_records, write_jsonl
+from finpost.data import preference_records, sft_record, split_records, write_jsonl
 
 
 def load_tatqa_json(dataset_name: str, split: str) -> list[dict]:
@@ -47,7 +47,7 @@ def main() -> None:
     if not records:
         raise ValueError("No usable TAT-QA records were produced")
     train, validation = split_records(records, config.data.validation_fraction, config.seed)
-    preferences = [preference_record(record, "I cannot determine this from the context.") for record in train]
+    preferences = preference_records(train, config.seed)
     write_jsonl(train, config.data.train_path)
     write_jsonl(validation, config.data.validation_path)
     write_jsonl(preferences, config.data.preference_path)

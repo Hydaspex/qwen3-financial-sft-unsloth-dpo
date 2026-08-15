@@ -1,7 +1,12 @@
 import pytest
 
 from finpost.checkpoints import find_resumable_checkpoint
-from finpost.data import preference_record, prompt_completion_record, split_records
+from finpost.data import (
+    preference_record,
+    preference_records,
+    prompt_completion_record,
+    split_records,
+)
 from finpost.evaluate import (
     bootstrap_ci,
     mcnemar_one_sided,
@@ -36,6 +41,41 @@ def test_prompt_completion_record_separates_prompt_from_answer():
     assert set(record) == {"prompt", "completion"}
     assert record["completion"] == [{"role": "assistant", "content": "435"}]
     assert [m["role"] for m in record["prompt"]] == ["system", "user"]
+
+
+def _chat(answer: str) -> dict:
+    return {"messages": [
+        {"role": "user", "content": "Question?"},
+        {"role": "assistant", "content": answer},
+    ]}
+
+
+def test_preference_records_reject_a_different_answer():
+    """A constant rejection only teaches the model to avoid one phrase; the
+    rejected answer has to be a real alternative for the pair to carry signal."""
+    records = [_chat("435"), _chat("1.8"), _chat("30,927"), _chat("2018")]
+
+    preferences = preference_records(records, seed=42)
+
+    assert len(preferences) == len(records)
+    for pref in preferences:
+        assert pref["rejected"] != pref["chosen"]
+
+
+def test_preference_records_match_answer_shape():
+    """Figures are rejected with figures and prose with prose, so the pair
+    turns on correctness rather than on which one looks like an answer."""
+    records = [_chat("435"), _chat("1.8"), _chat("restricted cash"), _chat("goodwill impairment")]
+
+    preferences = preference_records(records, seed=0)
+
+    numeric_rejections = [p["rejected"] for p in preferences if p["chosen"] in {"435", "1.8"}]
+    assert all(r in {"435", "1.8"} for r in numeric_rejections)
+
+
+def test_preference_records_are_deterministic():
+    records = [_chat("435"), _chat("1.8"), _chat("30,927")]
+    assert preference_records(records, seed=7) == preference_records(records, seed=7)
 
 
 def test_split_is_deterministic():

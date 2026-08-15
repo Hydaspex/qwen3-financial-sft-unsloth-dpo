@@ -33,6 +33,13 @@ def batch_generate(
     # the same index (the padded prompt length) for every row, so a single
     # prompt_len slice below is correct for the whole batch.
     tokenizer.padding_side = "left"
+    # Left truncation too: the chat template's generation-prompt marker sits
+    # at the very end of the rendered prompt. Right truncation (HF's default)
+    # would cut that marker off on any prompt longer than max_seq_length,
+    # leaving the model with no clear signal to start responding -- observed
+    # in practice as empty or degenerate repeating output on long-context
+    # examples.
+    tokenizer.truncation_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

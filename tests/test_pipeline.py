@@ -127,6 +127,19 @@ def test_batch_generate_matches_single_example_generation():
     assert batched == solo
 
 
+def test_batch_generate_sets_left_truncation():
+    """truncation_side must be left, not HF's default right: right truncation
+    would cut off the chat template's trailing generation-prompt marker on
+    any prompt longer than max_seq_length, leaving the model no signal to
+    start responding — observed in practice as empty/degenerate output on
+    long-context examples."""
+    model, tokenizer = _tiny_causal_lm()
+
+    batch_generate(model, tokenizer, ["hello"], max_seq_length=32, max_new_tokens=3, batch_size=1)
+
+    assert tokenizer.truncation_side == "left"
+
+
 def test_batch_generate_handles_batch_size_smaller_than_input():
     model, tokenizer = _tiny_causal_lm()
     prompts = ["one", "two", "three", "four", "five"]

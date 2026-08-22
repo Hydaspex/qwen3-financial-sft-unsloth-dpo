@@ -50,6 +50,24 @@ def jsonl_records(path: str) -> list[dict]:
         return [json.loads(line) for line in stream if line.strip()]
 
 
+def cached_predictions(pred_path: Path, expected_n: int) -> list[str] | None:
+    """Load a stage's predictions from a prior run if one completed cleanly.
+
+    Kaggle's idle timeout can kill the kernel mid-stage; without this, a
+    3-stage comparison that dies during "dpo" would force regenerating
+    "base" and "sft" too, burning GPU time on models that already finished.
+    Only trusts a cache whose row count matches the current eval set, so a
+    changed --limit or validation file can't silently reuse stale rows.
+    """
+    if not pred_path.exists():
+        return None
+    rows = jsonl_records(str(pred_path))
+    if len(rows) != expected_n:
+        return None
+    rows.sort(key=lambda r: r["index"])
+    return [r["prediction"] for r in rows]
+
+
 def load_model_for_inference(model_path: str, max_seq_length: int):
     """Load a model via Unsloth and set it up for inference.
 
@@ -136,13 +154,18 @@ def main() -> None:
             "dpo_adapter": args.dpo_adapter,
         })
         for stage, model_path in stages.items():
-            print(f"\n=== Generating with {stage}: {model_path} ===")
-            predictions = generate_predictions(
-                model_path,
-                records,
-                config.model.max_seq_length,
-                batch_size=args.batch_size,
-            )
+            pred_path = Path(f"outputs/predictions_{stage}.jsonl")
+            predictions = cached_predictions(pred_path, len(records))
+            if predictions is not None:
+                print(f"\n=== Reusing cached predictions for {stage}: {pred_path} ===")
+            else:
+                print(f"\n=== Generating with {stage}: {model_path} ===")
+                predictions = generate_predictions(
+                    model_path,
+                    records,
+                    config.model.max_seq_length,
+                    batch_size=args.batch_size,
+                )
             metrics = score_by_type(predictions, golds, answer_types)
             example_results = per_example_results(predictions, golds, answer_types)
             _, accuracy_lo, accuracy_hi = bootstrap_ci([r["correct"] for r in example_results])
@@ -153,7 +176,6 @@ def main() -> None:
                 mlflow.log_param("n_eval", len(records))
                 mlflow.log_metrics(metrics)
                 mlflow.log_metrics(ci)
-                pred_path = Path(f"outputs/predictions_{stage}.jsonl")
                 pred_path.parent.mkdir(parents=True, exist_ok=True)
                 pred_path.write_text(
                     "\n".join(

@@ -78,24 +78,36 @@ Set `MLFLOW_TRACKING_URI=databricks` for Databricks tracking; otherwise runs use
 
 ## Results
 
-`compare_models.py` on 50 held-out TAT-QA prompts, greedy decoding, seed 42:
+`compare_models.py` on the full 662-example TAT-QA validation split, seed 42, `batch_size 8`:
 
-| Stage | numeric_em | span_match | combined |
-| ----- | ---------: | ---------: | -------: |
-| Base  |       0.20 |       0.50 |     0.35 |
-| SFT   |       0.50 |       0.50 |     0.50 |
-| DPO   |       0.70 |       0.70 |     0.70 |
+| Stage | accuracy | 95% CI |
+| ----- | -------: | -----: |
+| Base  |   0.1949 | [0.166, 0.225] |
+| SFT   |   0.1239 | [0.101, 0.150] |
+| DPO   |   0.1405 | [0.116, 0.168] |
 
-SFT's gain is concentrated in `numeric_em` (0.20 → 0.50): supervised fine-tuning teaches the model to extract and format the numeric answer TAT-QA expects, but `span_match` doesn't move on its own. DPO lifts both metrics together (`span_match` 0.50 → 0.70, `numeric_em` 0.50 → 0.70), consistent with preference optimisation rewarding concise, context-grounded answers rather than one specific answer shape.
+Taken at face value, this looks like a regression: base outperforms both fine-tuned stages. That reading does not survive a breakdown by answer type, however, which tells a substantially different story:
 
-50 examples is small enough that these numbers should be read as a directional signal, not a tight estimate — see below.
+| Answer type | n | Base | SFT | DPO |
+| --- | --: | --: | --: | --: |
+| arithmetic | 281 | 0.0036 | 0.0961 | 0.0996 |
+| span | 293 | 0.3515 | 0.1092 | 0.1502 |
+| multi-span | 68 | 0.3676 | 0.2353 | 0.2794 |
+| count | 20 | 0.00 | 0.35 | 0.10 |
+
+On `arithmetic` — the largest category, and the direct payoff of this session's completion-only-loss fix — fine-tuning takes the base model from near-total failure (0.36%) to roughly 10%, a gain of some 27x. That gain comes at a real cost on `span` and `multi_span`, though: base's verbose, unconstrained generation happens to contain the correct extracted text somewhere in its output more often than either fine-tuned model's concise answers do, and since `span` is nearly as large a category as `arithmetic` (293 examples against 281), the loss there is large enough to outweigh the arithmetic gain in the aggregate score. In other words, the aggregate number is not wrong so much as it is averaging together a large win and a real loss and reporting the difference as if nothing had happened.
+
+This is precisely the failure mode the type-aware scoring fix was meant to catch, and it worked: without the per-type breakdown, this tradeoff would have been invisible, buried inside a single blended number.
+
+The span regression was worth investigating rather than leaving unexplained, since it involved genuinely degenerate output — repetition, empty strings, and one particular hallucinated token (`Intialized`) recurring verbatim across otherwise unrelated examples. Three concrete, checkable causes were ruled out against the real data: training-data truncation corrupting span targets (99.7% of span answers are actually present in the truncated training context, so the targets themselves are sound), prompt-length truncation at evaluation time, and generation-budget truncation (the degenerate outputs are short, not cut off mid-answer at the `max_new_tokens=64` ceiling). A data leak was ruled out too — the hallucinated token appears nowhere in the raw TAT-QA data or the constructed DPO preference pairs. What remains, and what best fits the evidence, is a training-sufficiency explanation: producing a long, exactly-correct extracted span is a harder generation skill than emitting a single number, and a LoRA-adapted model evidently has not converged on it as reliably as it has on short numeric answers.
 
 ## What I learned / what I'd do differently
 
-- **Eval set size is the weakest link, not the training recipe.** 50 examples is enough to see a clear base → SFT → DPO ordering but too few to trust the exact gap between stages. Next iteration: score the full validation split (or several hundred examples) and report confidence intervals rather than point estimates.
-- **`span_match` staying flat after SFT was a useful signal, not a bug.** It showed SFT was optimising answer *formatting* rather than answer *correctness* on non-numeric questions, which is exactly the kind of gap DPO is meant to close — the metric split validated the two-stage design instead of just confirming "training helped."
-- **Numeric-tolerance EM and span match don't catch fluent-but-wrong reasoning.** Both are surface-form metrics; a model can get the right span for the wrong reason. An LLM-judge or small human-graded sample would be the next addition to confirm the gains reflect real reasoning quality, not metric gaming.
-- **Sequential model loading (`compare_models.py` loads/scores/frees one model at a time) was the right call for single-GPU Colab, but it makes the comparison slow to iterate on.** With more VRAM I'd load all three concurrently, or cache generations so metric changes don't require re-running inference.
+- **The aggregate score hid a real tradeoff, not a null result.** Base beating both fine-tuned stages looked at first like fine-tuning had failed outright — but the per-type breakdown told a different story: a large arithmetic gain offset by a genuine span-extraction regression, two effects a single blended number cannot tell apart from "nothing changed." Scoring by answer type should have been the default from the start.
+- **The span regression was worth diagnosing by elimination rather than by guessing.** Training-data truncation, prompt truncation, generation-budget truncation, and a data leak were each checked directly against the real data and ruled out in turn, leaving training-sufficiency as the credible explanation rather than the convenient one.
+- **Spot-checking real predictions is what made that diagnosis possible.** The metrics alone would never have shown that SFT/DPO's wrong span answers were degenerate — repetition, empty strings, a recurring hallucinated token — rather than simply incorrect.
+- **The full 662-example split with bootstrap CIs has replaced the earlier 50-example directional read**, tight enough now to support the arithmetic-gain claim with real confidence.
+- **The natural next step is more span-focused training, not further diagnosis** — more epochs, more span-type examples, or length-aware curriculum ordering, now that this run's data has been checked as thoroughly as is useful.
 
 ## Licence
 
